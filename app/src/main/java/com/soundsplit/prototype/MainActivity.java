@@ -23,6 +23,13 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.spotify.android.appremote.api.ConnectionParams;
+import com.spotify.android.appremote.api.Connector;
+import com.spotify.android.appremote.api.SpotifyAppRemote;
+import com.spotify.protocol.client.Subscription;
+import com.spotify.protocol.types.PlayerState;
+import com.spotify.protocol.types.Track;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -32,6 +39,10 @@ public class MainActivity extends Activity {
 
     private static final int REQUEST_AUDIO_FILE = 1001;
     private static final int REQUEST_PERMISSIONS = 1002;
+
+    // Spotify Client ID is public application identification, not a client secret.
+    private static final String SPOTIFY_CLIENT_ID = "e9adac45b83e4d4fa3ba6089f56b7f46";
+    private static final String SPOTIFY_REDIRECT_URI = "soundsplit://callback";
 
     private static final int BG = Color.rgb(247, 247, 251);
     private static final int CARD = Color.WHITE;
@@ -60,6 +71,13 @@ public class MainActivity extends Activity {
     private TextView liveStatus;
     private Spinner outputSpinner;
 
+    private SpotifyAppRemote spotifyAppRemote;
+    private Subscription<PlayerState> spotifyStateSubscription;
+    private TextView spotifyStatus;
+    private TextView spotifyTrack;
+    private Button spotifyPlayPauseButton;
+    private boolean spotifyPaused = true;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -72,6 +90,12 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshLiveStatus();
+    }
+
+    @Override
+    protected void onStop() {
+        disconnectSpotify();
+        super.onStop();
     }
 
     private void buildUi() {
@@ -105,6 +129,34 @@ public class MainActivity extends Activity {
                 "What we are testing",
                 "SoundSplit will intentionally NOT request normal Android audio focus. It will request a specific output device for its own player and continue in a media-playback foreground service.",
                 PURPLE));
+
+        LinearLayout spotifyCard = card();
+        spotifyCard.addView(sectionTitle("Spotify control · v0.3"));
+        spotifyStatus = body("Not connected to Spotify.");
+        spotifyStatus.setTextColor(ORANGE);
+        spotifyCard.addView(spotifyStatus);
+        spotifyTrack = body("Current track: —");
+        spotifyCard.addView(spotifyTrack);
+        spotifyCard.addView(primaryButton("Connect Spotify", v -> connectSpotify()));
+        spotifyCard.addView(secondaryButton("Open Spotify to choose music", v -> openSpotify()));
+
+        LinearLayout spotifyControls = new LinearLayout(this);
+        spotifyControls.setOrientation(LinearLayout.HORIZONTAL);
+        spotifyControls.setGravity(Gravity.CENTER);
+        Button previous = secondaryButton("Previous", v -> spotifyPrevious());
+        spotifyPlayPauseButton = secondaryButton("Play / Pause", v -> spotifyTogglePlayPause());
+        Button next = secondaryButton("Next", v -> spotifyNext());
+        spotifyControls.addView(previous, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        spotifyControls.addView(spotifyPlayPauseButton, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        spotifyControls.addView(next, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        spotifyCard.addView(spotifyControls);
+
+        TextView spotifyNote = body(
+                "Spotify mode controls the installed Spotify app. Spotify still owns its audio focus and output route, so this mode does not yet inherit SoundSplit's protected local-player routing.");
+        spotifyNote.setTextSize(12);
+        spotifyNote.setTextColor(MUTED);
+        spotifyCard.addView(spotifyNote);
+        root.addView(spotifyCard);
 
         LinearLayout musicCard = card();
         musicCard.addView(sectionTitle("1  Choose a test song"));
@@ -295,6 +347,141 @@ public class MainActivity extends Activity {
         return new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private void connectSpotify() {
+        if (spotifyAppRemote != null) {
+            spotifyStatus.setText("Spotify is already connected.");
+            spotifyStatus.setTextColor(GREEN);
+            return;
+        }
+
+        spotifyStatus.setText("Connecting to Spotify…");
+        spotifyStatus.setTextColor(ORANGE);
+
+        ConnectionParams params = new ConnectionParams.Builder(SPOTIFY_CLIENT_ID)
+                .setRedirectUri(SPOTIFY_REDIRECT_URI)
+                .showAuthView(true)
+                .build();
+
+        SpotifyAppRemote.connect(this, params, new Connector.ConnectionListener() {
+            @Override
+            public void onConnected(SpotifyAppRemote appRemote) {
+                spotifyAppRemote = appRemote;
+                runOnUiThread(() -> {
+                    spotifyStatus.setText("Connected to Spotify.");
+                    spotifyStatus.setTextColor(GREEN);
+                });
+                subscribeToSpotifyState();
+            }
+
+            @Override
+            public void onFailure(Throwable error) {
+                String message = error == null ? "Unknown connection error" : error.getClass().getSimpleName();
+                if (error != null && error.getMessage() != null && !error.getMessage().trim().isEmpty()) {
+                    message += ": " + error.getMessage();
+                }
+                final String finalMessage = message;
+                runOnUiThread(() -> {
+                    spotifyStatus.setText("Spotify connection failed: " + finalMessage);
+                    spotifyStatus.setTextColor(ORANGE);
+                });
+            }
+        });
+    }
+
+    private void subscribeToSpotifyState() {
+        if (spotifyAppRemote == null) return;
+        try {
+            spotifyStateSubscription = spotifyAppRemote.getPlayerApi()
+                    .subscribeToPlayerState()
+                    .setEventCallback(this::showSpotifyPlayerState)
+                    .setErrorCallback(error -> runOnUiThread(() -> {
+                        spotifyStatus.setText("Spotify state error: " + error.getClass().getSimpleName());
+                        spotifyStatus.setTextColor(ORANGE);
+                    }));
+        } catch (RuntimeException e) {
+            spotifyStatus.setText("Could not subscribe to Spotify state: " + e.getClass().getSimpleName());
+            spotifyStatus.setTextColor(ORANGE);
+        }
+    }
+
+    private void showSpotifyPlayerState(PlayerState state) {
+        if (state == null) return;
+        spotifyPaused = state.isPaused;
+        Track track = state.track;
+        String line = "Current track: —";
+        if (track != null) {
+            String artist = (track.artist == null || track.artist.name == null) ? "Unknown artist" : track.artist.name;
+            line = "Current track: " + track.name + " · " + artist;
+        }
+        final String display = line;
+        runOnUiThread(() -> {
+            spotifyTrack.setText(display);
+            spotifyPlayPauseButton.setText(spotifyPaused ? "Play" : "Pause");
+        });
+    }
+
+    private boolean requireSpotifyConnection() {
+        if (spotifyAppRemote != null) return true;
+        Toast.makeText(this, "Connect Spotify first.", Toast.LENGTH_SHORT).show();
+        return false;
+    }
+
+    private void spotifyTogglePlayPause() {
+        if (!requireSpotifyConnection()) return;
+        if (spotifyPaused) {
+            spotifyAppRemote.getPlayerApi().resume()
+                    .setErrorCallback(error -> showSpotifyCommandError("Play", error));
+        } else {
+            spotifyAppRemote.getPlayerApi().pause()
+                    .setErrorCallback(error -> showSpotifyCommandError("Pause", error));
+        }
+    }
+
+    private void spotifyPrevious() {
+        if (!requireSpotifyConnection()) return;
+        spotifyAppRemote.getPlayerApi().skipPrevious()
+                .setErrorCallback(error -> showSpotifyCommandError("Previous", error));
+    }
+
+    private void spotifyNext() {
+        if (!requireSpotifyConnection()) return;
+        spotifyAppRemote.getPlayerApi().skipNext()
+                .setErrorCallback(error -> showSpotifyCommandError("Next", error));
+    }
+
+    private void showSpotifyCommandError(String command, Throwable error) {
+        final String detail = error == null ? "Unknown error" : error.getClass().getSimpleName();
+        runOnUiThread(() -> Toast.makeText(this, command + " failed: " + detail, Toast.LENGTH_SHORT).show());
+    }
+
+    private void openSpotify() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage("com.spotify.music");
+        if (launch != null) {
+            startActivity(launch);
+            return;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.spotify.music")));
+        } catch (Exception ignored) {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=com.spotify.music")));
+        }
+    }
+
+    private void disconnectSpotify() {
+        if (spotifyStateSubscription != null) {
+            try { spotifyStateSubscription.cancel(); } catch (RuntimeException ignored) {}
+            spotifyStateSubscription = null;
+        }
+        if (spotifyAppRemote != null) {
+            try { SpotifyAppRemote.disconnect(spotifyAppRemote); } catch (RuntimeException ignored) {}
+            spotifyAppRemote = null;
+        }
+        if (spotifyStatus != null) {
+            spotifyStatus.setText("Not connected to Spotify.");
+            spotifyStatus.setTextColor(MUTED);
+        }
     }
 
     private void chooseAudioFile() {
