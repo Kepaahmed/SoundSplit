@@ -1,0 +1,20 @@
+SOUNDSPLIT — GITHUB READY
+
+This folder already has the correct Android/GitHub directory structure.
+
+IMPORTANT:
+Do NOT select the individual Java/XML/YML files one by one.
+Open this folder in your computer's file manager, select ALL top-level items together
+(including the .github folder), and drag them onto GitHub's “Upload files” page.
+
+The GitHub repository root should show these top-level items:
+  .github/
+  app/
+  .gitignore
+  README.md
+  TEST_RESULTS.md
+  build.gradle.kts
+  gradle.properties
+  settings.gradle.kts
+
+Then open Actions > Build SoundSplit APK > Run workflow.
