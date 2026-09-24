@@ -25,17 +25,61 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
-      - name: Show Android SDK
+      - name: Verify Android SDK
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME/platforms/android-36"
-          ls "$ANDROID_HOME/build-tools/36.0.0"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/build-tools/36.0.0"
+          echo "Android 36 toolchain is ready."
 
-      - name: Build SoundSplit APK
+      - name: Download Spotify App Remote SDK 0.8.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p app/libs
+          ASSET_URL=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://api.github.com/repos/spotify/android-sdk/releases/tags/v0.8.0-appremote_v2.1.0-auth \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(a["browser_download_url"] for a in d["assets"] if a["name"] == "spotify-app-remote-release-0.8.0.aar"))')
+          curl -fL "$ASSET_URL" -o app/libs/spotify-app-remote-release-0.8.0.aar
+          test -s app/libs/spotify-app-remote-release-0.8.0.aar
+
+      - name: Restore SoundSplit signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ]; then
+            echo "::error::SoundSplit signing secrets are missing. Add them under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/soundsplit-prototype-signing.jks
+          ACTUAL_SHA1=$(keytool -list -v \
+            -keystore app/soundsplit-prototype-signing.jks \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_KEY_ALIAS" \
+            | awk '/SHA1:/{print $2; exit}')
+          EXPECTED_SHA1="3F:C8:BC:C6:F6:FE:E3:9C:47:DD:A7:6A:F4:F5:7B:9E:06:79:C2:1C"
+          echo "Signing SHA-1: $ACTUAL_SHA1"
+          if [ "$ACTUAL_SHA1" != "$EXPECTED_SHA1" ]; then
+            echo "::error::Signing fingerprint does not match the Spotify Dashboard fingerprint."
+            exit 1
+          fi
+
+      - name: Build signed SoundSplit APK
+        env:
+          SOUNDSPLIT_KEYSTORE_PATH: soundsplit-prototype-signing.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK signing certificate
+        run: "$ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs app/build/outputs/apk/debug/app-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SoundSplit-APK
+          name: SoundSplit-Spotify-v0.3-APK
           path: app/build/outputs/apk/debug/app-debug.apk
