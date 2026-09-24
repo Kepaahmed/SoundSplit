@@ -393,7 +393,7 @@ public class MainActivity extends Activity {
     private void subscribeToSpotifyState() {
         if (spotifyAppRemote == null) return;
         try {
-            spotifyStateSubscription = spotifyAppRemote.getPlayerApi()
+            spotifyStateSubscription = (Subscription<PlayerState>) spotifyAppRemote.getPlayerApi()
                     .subscribeToPlayerState()
                     .setEventCallback(this::showSpotifyPlayerState)
                     .setErrorCallback(error -> runOnUiThread(() -> {
